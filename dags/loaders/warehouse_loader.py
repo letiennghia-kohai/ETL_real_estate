@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import json
 import re
@@ -37,11 +38,75 @@ class WarehouseLoader:
         self.next_amenity_key = 1
         self.next_contact_key = 1
         self.next_source_key = 1
-        self.connection_string = "mysql+pymysql://airflow_user:airflow_user@mysql_container:3306/airflow_db"
+        self.connection_string = "mysql+pymysql://airflow_user:airflow_password@mysql_container:3306/airflow_db"
         self.schema_name = 'real_estate_dw'
         self.engine = None
         self.metadata = MetaData()
-    
+        
+    def load_oltp_data_from_staging(self, staging_data_path):
+        """
+        Đọc dữ liệu OLTP từ thư mục staging
+        """
+        # Lấy thư mục chứa các file CSV từ unify_data
+        # staging_data_path có dạng: "data/staging/unified_data_20250529.csv"
+        # Cần lấy thư mục: "data/staging/proceed/20250529/"
+        
+        date_part = staging_data_path.split('_')[-1].replace('.csv', '')
+        proceed_dir = f"data/staging/proceed/{date_part}"
+        
+        oltp_data = {}
+        
+        try:
+            # Danh sách các file CSV cần đọc
+            csv_files = [
+                'raw_property_listings.csv',
+                'raw_property_details.csv', 
+                'raw_contact_info.csv',
+                'property_address.csv',
+                'extracted_features.csv',
+                'raw_property_amenities.csv',
+                'invalid_records.csv',
+                'duplicate_records.csv'
+            ]
+            
+            for csv_file in csv_files:
+                file_path = os.path.join(proceed_dir, csv_file)
+                if os.path.exists(file_path):
+                    df = pd.read_csv(file_path, encoding='utf-8')
+                    table_name = csv_file.replace('.csv', '')
+                    oltp_data[table_name] = df
+                    print(f"Đã đọc {len(df)} records từ {csv_file}")
+                else:
+                    print(f"Không tìm thấy file: {file_path}")
+                    
+            # Đọc thêm unified data nếu cần
+            unified_path = os.path.join(proceed_dir, "unified_data.csv")
+            if os.path.exists(unified_path):
+                oltp_data['unified_data'] = pd.read_csv(unified_path, encoding='utf-8')
+                
+        except Exception as e:
+            print(f"Lỗi khi đọc dữ liệu OLTP: {str(e)}")
+            raise
+            
+        return oltp_data
+
+    def save_olap_data_to_files(self, olap_data, output_dir):
+        """
+        Lưu OLAP data thành các file CSV để backup/debug
+        """
+        try:
+            olap_backup_dir = os.path.join(output_dir, "backup")
+            os.makedirs(olap_backup_dir, exist_ok=True)
+            
+            for table_name, df in olap_data.items():
+                if not df.empty:
+                    file_path = os.path.join(olap_backup_dir, f"{table_name}.csv")
+                    df.to_csv(file_path, index=False, encoding='utf-8')
+                    print(f"Đã lưu backup {table_name}: {len(df)} records")
+                    
+        except Exception as e:
+            print(f"Lỗi khi lưu backup OLAP data: {str(e)}")
+
     def transform_to_olap(self, oltp_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         """
         Transform OLTP data to OLAP star schema
@@ -421,14 +486,14 @@ class WarehouseLoader:
             return pd.DataFrame()
         
         listings_df = oltp_data['raw_property_listings']
-        media_df = oltp_data.get('property_media', pd.DataFrame())
+        # media_df = oltp_data.get('property_media', pd.DataFrame())
         fact_data = []
         
         for _, row in listings_df.iterrows():
             listing_id = row.get('listing_id', '')
             
             # Get media for this listing
-            listing_media = media_df[media_df['listing_id'] == listing_id] if not media_df.empty else pd.DataFrame()
+            # listing_media = media_df[media_df['listing_id'] == listing_id] if not media_df.empty else pd.DataFrame()
             
             description = str(row.get('description', ''))
             title = str(row.get('title', ''))
@@ -446,11 +511,11 @@ class WarehouseLoader:
                 'days_on_market': self._calculate_days_on_market(row),
                 'view_count': None,  # Not available in current data
                 'contact_count': None,  # Not available in current data
-                'listing_quality_score': self._calculate_listing_quality_score(row, listing_media),
-                'has_photos': len(listing_media) > 0,
-                'photos_count': len(listing_media),
-                'has_video': self._has_video(listing_media),
-                'has_360_view': self._has_360_view(listing_media),
+                # 'listing_quality_score': self._calculate_listing_quality_score(row, listing_media),
+                # 'has_photos': len(listing_media) > 0,
+                # 'photos_count': len(listing_media),
+                # 'has_video': self._has_video(listing_media),
+                # 'has_360_view': self._has_360_view(listing_media),
                 'phone_reveal_count': None,  # Not available
                 'save_count': None,  # Not available
                 'share_count': None,  # Not available
@@ -465,7 +530,7 @@ class WarehouseLoader:
         
         return pd.DataFrame(fact_data)
     
-    # Helper methods for key generation and lookups
+   # Helper methods for key generation and lookups
     def _get_or_create_location_key(self, row) -> int:
         """Get or create location key"""
         location_hash = self._hash_location(row)
@@ -473,12 +538,18 @@ class WarehouseLoader:
             self.location_cache[location_hash] = self.next_location_key
             self.next_location_key += 1
         return self.location_cache[location_hash]
-    
+
     def _hash_location(self, row) -> str:
         """Create hash for location"""
-        location_str = f"{row.get('city', '')}_{row.get('district', '')}_{row.get('ward', '')}_{row.get('street', '')}"
+        # Safe string conversion with null handling
+        city = str(row.get('city', '')).strip() if pd.notna(row.get('city')) else ''
+        district = str(row.get('district', '')).strip() if pd.notna(row.get('district')) else ''
+        ward = str(row.get('ward', '')).strip() if pd.notna(row.get('ward')) else ''
+        street = str(row.get('street', '')).strip() if pd.notna(row.get('street')) else ''
+        
+        location_str = f"{city}_{district}_{ward}_{street}"
         return hashlib.md5(location_str.encode()).hexdigest()[:16]
-    
+
     def _get_or_create_property_key(self, row) -> int:
         """Get or create property key"""
         property_hash = self._hash_property(row)
@@ -486,15 +557,244 @@ class WarehouseLoader:
             self.property_cache[property_hash] = self.next_property_key
             self.next_property_key += 1
         return self.property_cache[property_hash]
-    
+
     def _hash_property(self, row) -> str:
         """Create hash for property"""
-        property_str = f"{row.get('property_type', '')}_{row.get('property_subtype', '')}"
+        # Safe string conversion with null handling
+        property_type = str(row.get('property_type', '')).strip() if pd.notna(row.get('property_type')) else ''
+        property_subtype = str(row.get('property_subtype', '')).strip() if pd.notna(row.get('property_subtype')) else ''
+        
+        property_str = f"{property_type}_{property_subtype}"
         return hashlib.md5(property_str.encode()).hexdigest()[:16]
+    def _get_or_create_legal_key(self, row) -> int:
+        """Get or create legal key"""
+        legal_hash = self._hash_legal(row)
+        if legal_hash not in self.legal_cache:
+            self.legal_cache[legal_hash] = self.next_legal_key
+            self.next_legal_key += 1
+        return self.legal_cache[legal_hash]
+
+    def _hash_legal(self, row) -> str:
+        """Create hash for legal dimension"""
+        legal_docs = str(row.get('legal_documents', '')).strip() if pd.notna(row.get('legal_documents')) else ''
+        category = str(self._categorize_legal_status(legal_docs)).strip()
+        loan_eligible = str(self._can_get_bank_loan(legal_docs)).strip()
+        transferable = str(self._is_transferable(legal_docs)).strip()
+        
+        legal_str = f"{legal_docs}_{category}_{loan_eligible}_{transferable}"
+        return hashlib.md5(legal_str.encode()).hexdigest()[:16]
+
+    def _get_or_create_structure_key(self, row) -> int:
+        """Get or create structure key"""
+        structure_hash = self._hash_structure(row)
+        if structure_hash not in self.structure_cache:
+            self.structure_cache[structure_hash] = self.next_structure_key
+            self.next_structure_key += 1
+        return self.structure_cache[structure_hash]
+
+    def _hash_structure(self, row) -> str:
+        """Create hash for structure dimension"""
+        direction = str(row.get('direction', '')).strip() if pd.notna(row.get('direction')) else ''
+        balcony_dir = str(row.get('balcony_direction', '')).strip() if pd.notna(row.get('balcony_direction')) else ''
+        structure_type = str(self._get_structure_type(row)).strip()
+        layout_type = str(self._get_layout_type(row)).strip()
+        
+        structure_str = f"{direction}_{balcony_dir}_{structure_type}_{layout_type}"
+        return hashlib.md5(structure_str.encode()).hexdigest()[:16]
+
+    def _get_or_create_amenity_key(self, amenity_name) -> int:
+        """Get or create amenity key"""
+        amenity_hash = self._hash_amenity(amenity_name)
+        if amenity_hash not in self.amenity_cache:
+            self.amenity_cache[amenity_hash] = self.next_amenity_key
+            self.next_amenity_key += 1
+        return self.amenity_cache[amenity_hash]
+
+    def _hash_amenity(self, amenity_name) -> str:
+        """Create hash for amenity dimension"""
+        name = str(amenity_name).strip() if amenity_name else ''
+        category = str(self._categorize_amenity(name)).strip()
+        amenity_type = str(self._get_amenity_type(name)).strip()
+        
+        amenity_str = f"{name}_{category}_{amenity_type}"
+        return hashlib.md5(amenity_str.encode()).hexdigest()[:16]
+
+    def _get_or_create_contact_key(self, row) -> int:
+        """Get or create contact key"""
+        contact_hash = self._hash_contact(row)
+        if contact_hash not in self.contact_cache:
+            self.contact_cache[contact_hash] = self.next_contact_key
+            self.next_contact_key += 1
+        return self.contact_cache[contact_hash]
+
+    def _hash_contact(self, row) -> str:
+        """Create hash for contact dimension"""
+        contact_type = str(row.get('contact_type', '')).strip() if pd.notna(row.get('contact_type')) else ''
+        is_agent = str(self._is_agent(row)).strip()
+        is_company = str(self._is_company(row)).strip()
+        agent_level = str(self._get_agent_level(row)).strip()
+        company_size = str(self._get_company_size(row)).strip()
+        
+        contact_str = f"{contact_type}_{is_agent}_{is_company}_{agent_level}_{company_size}"
+        return hashlib.md5(contact_str.encode()).hexdigest()[:16]
     
-    # Additional helper methods would continue here...
-    # (Implementation continues with all the helper methods for calculations, categorizations, etc.)
-    
+    def _get_time_key(self, created_at: Optional[pd.Timestamp]) -> Optional[int]:
+        """
+        Get time dimension key based on created_at timestamp.
+        
+        Args:
+            created_at: Timestamp of when the listing was created
+            
+        Returns:
+            Time dimension key or None if invalid input
+        """
+        if pd.isna(created_at) or not isinstance(created_at, (pd.Timestamp, datetime)):
+            return None
+            
+        # Assume time dimension table has keys based on date
+        # Format: YYYYMMDD (e.g., 20250620 for June 20, 2025)
+        try:
+            return int(created_at.strftime('%Y%m%d'))
+        except (ValueError, AttributeError):
+            return None
+
+    def _get_location_key_for_listing(self, row: pd.Series, oltp_data: Dict[str, pd.DataFrame]) -> Optional[int]:
+        """
+        Get location dimension key based on listing data.
+        
+        Args:
+            row: Series containing listing data
+            oltp_data: Dictionary of OLTP DataFrames
+            
+        Returns:
+            Location dimension key or None if not found
+        """
+        # Assume location data is in raw_property_listings or related tables
+        city = row.get('city')
+        district = row.get('district')
+        ward = row.get('ward')
+        
+        if pd.isna(city) or pd.isna(district):
+            return None
+            
+        # Assume location dimension table exists in oltp_data
+        location_df = oltp_data.get('dim_location', pd.DataFrame())
+        if location_df.empty:
+            return None
+            
+        # Match location based on city, district, ward
+        condition = (
+            (location_df['city'] == city) & 
+            (location_df['district'] == district)
+        )
+        if not pd.isna(ward):
+            condition &= (location_df['ward'] == ward)
+            
+        matching_locations = location_df[condition]
+        if not matching_locations.empty:
+            return matching_locations['location_key'].iloc[0]
+        return None
+
+    def _get_property_key_for_listing(self, row: pd.Series) -> Optional[int]:
+        """
+        Get property dimension key based on listing data.
+        
+        Args:
+            row: Series containing listing data
+            
+        Returns:
+            Property dimension key or None if not found
+        """
+        property_type = row.get('property_type')
+        if pd.isna(property_type):
+            return None
+            
+        # Assume property dimension table is maintained separately
+        # Simple mapping for common property types (this could be a lookup table)
+        property_type_map = {
+            'house': 1,
+            'apartment': 2,
+            'condo': 3,
+            'land': 4,
+            'villa': 5
+        }
+        
+        return property_type_map.get(property_type.lower(), None)
+
+    def _get_legal_key_for_listing(self, row: pd.Series, oltp_data: Dict[str, pd.DataFrame]) -> Optional[int]:
+        """
+        Get legal dimension key based on listing data.
+        
+        Args:
+            row: Series containing listing data
+            oltp_data: Dictionary of OLTP DataFrames
+            
+        Returns:
+            Legal dimension key or None if not found
+        """
+        legal_status = row.get('legal_status')
+        if pd.isna(legal_status):
+            return None
+            
+        # Assume legal dimension table exists in oltp_data
+        legal_df = oltp_data.get('dim_legal', pd.DataFrame())
+        if legal_df.empty:
+            return None
+            
+        matching_legal = legal_df[legal_df['legal_status'] == legal_status]
+        if not matching_legal.empty:
+            return matching_legal['legal_key'].iloc[0]
+        return None
+
+    def _get_structure_key_for_listing(self, detail_row: Dict) -> Optional[int]:
+        """
+        Get structure dimension key based on property details.
+        
+        Args:
+            detail_row: Dictionary containing property details
+            
+        Returns:
+            Structure dimension key or None if not found
+        """
+        structure_type = detail_row.get('structure_type')
+        if not structure_type:
+            return None
+            
+        # Assume structure dimension table with simple mapping
+        structure_type_map = {
+            'detached': 1,
+            'semi-detached': 2,
+            'terraced': 3,
+            'apartment': 4
+        }
+        
+        return structure_type_map.get(structure_type.lower(), None)
+
+    def _get_contact_key_for_listing(self, row: pd.Series, oltp_data: Dict[str, pd.DataFrame]) -> Optional[int]:
+        """
+        Get contact dimension key based on listing data.
+        
+        Args:
+            row: Series containing listing data
+            oltp_data: Dictionary of OLTP DataFrames
+            
+        Returns:
+            Contact dimension key or None if not found
+        """
+        contact_id = row.get('contact_id')
+        if pd.isna(contact_id):
+            return None
+            
+        # Assume contact dimension table exists in oltp_data
+        contact_df = oltp_data.get('dim_contact', pd.DataFrame())
+        if contact_df.empty:
+            return None
+            
+        matching_contact = contact_df[contact_df['contact_id'] == contact_id]
+        if not matching_contact.empty:
+            return matching_contact['contact_key'].iloc[0]
+        return None
+
     def _convert_to_numeric(self, value) -> float:
         """Convert value to numeric, return 0 if conversion fails"""
         try:
@@ -503,22 +803,34 @@ class WarehouseLoader:
             return float(value)
         except (ValueError, TypeError):
             return 0.0
-    
+
+    def _safe_str(self, value) -> str:
+        """Safely convert value to string, handle NaN and None"""
+        if pd.isna(value) or value is None:
+            return ''
+        return str(value).strip()
+
     def _get_season(self, month: int) -> str:
         """Get season from month"""
-        if month in [12, 1, 2]:
-            return 'Winter'
-        elif month in [3, 4, 5]:
-            return 'Spring'
-        elif month in [6, 7, 8]:
-            return 'Summer'
-        else:
-            return 'Fall'
-    
+        try:
+            month = int(month) if pd.notna(month) else 1
+            if month in [12, 1, 2]:
+                return 'Winter'
+            elif month in [3, 4, 5]:
+                return 'Spring'
+            elif month in [6, 7, 8]:
+                return 'Summer'
+            else:
+                return 'Fall'
+        except (ValueError, TypeError):
+            return 'Unknown'
+
     def _get_region(self, city: str) -> str:
         """Get region from city"""
-        north_cities = ['Hà Nội', 'Hải Phòng', 'Quảng Ninh', 'Nam Định']
-        south_cities = ['TP.HCM', 'Hồ Chí Minh', 'Cần Thơ', 'Vũng Tàu', 'Đồng Nai', 'Bình Dương']
+        city = self._safe_str(city).lower()
+        
+        north_cities = ['hà nội', 'hai phong', 'hải phòng', 'quang ninh', 'quảng ninh', 'nam định', 'nam dinh']
+        south_cities = ['tp.hcm', 'hồ chí minh', 'ho chi minh', 'can tho', 'cần thơ', 'vung tau', 'vũng tàu', 'dong nai', 'đồng nai', 'binh duong', 'bình dương']
         
         if any(nc in city for nc in north_cities):
             return 'Miền Bắc'
@@ -526,11 +838,13 @@ class WarehouseLoader:
             return 'Miền Nam'
         else:
             return 'Miền Trung'
-    
+
     def _get_city_tier(self, city: str) -> str:
         """Get city tier"""
-        tier1_cities = ['Hà Nội', 'TP.HCM', 'Hồ Chí Minh']
-        tier2_cities = ['Đà Nẵng', 'Hải Phòng', 'Cần Thơ']
+        city = self._safe_str(city).lower()
+        
+        tier1_cities = ['hà nội', 'tp.hcm', 'hồ chí minh', 'ho chi minh']
+        tier2_cities = ['đà nẵng', 'da nang', 'hải phòng', 'hai phong', 'cần thơ', 'can tho']
         
         if any(t1 in city for t1 in tier1_cities):
             return 'Tier 1'
@@ -538,70 +852,113 @@ class WarehouseLoader:
             return 'Tier 2'
         else:
             return 'Tier 3'
-    
+
     def _calculate_location_score(self, row) -> float:
         """Calculate location score based on various factors"""
-        # Simple scoring logic - can be enhanced
-        base_score = 50.0
-        
-        city = row.get('city', '')
-        if 'Hà Nội' in city or 'TP.HCM' in city:
-            base_score += 30
-        elif 'Đà Nẵng' in city:
-            base_score += 20
-        
-        # Add more scoring logic based on district, infrastructure, etc.
-        return min(base_score, 100.0)
-    
+        try:
+            base_score = 50.0
+            
+            city = self._safe_str(row.get('city', '')).lower()
+            
+            # Major cities get higher scores
+            if any(major_city in city for major_city in ['hà nội', 'tp.hcm', 'hồ chí minh', 'ho chi minh']):
+                base_score += 30
+            elif any(big_city in city for big_city in ['đà nẵng', 'da nang']):
+                base_score += 20
+            elif any(medium_city in city for medium_city in ['hải phòng', 'hai phong', 'cần thơ', 'can tho']):
+                base_score += 15
+            
+            # District bonus (if available)
+            district = self._safe_str(row.get('district', '')).lower()
+            if any(central_district in district for central_district in ['quận 1', 'quan 1', 'ba đình', 'ba dinh', 'hoàn kiếm', 'hoan kiem']):
+                base_score += 10
+            
+            return min(base_score, 100.0)
+        except Exception as e:
+            # Log error if needed
+            return 50.0  # Default score
+
     def _calculate_infrastructure_score(self, row) -> float:
         """Calculate infrastructure score"""
-        # Placeholder - would need more detailed analysis
-        return 75.0
-    
+        try:
+            base_score = 50.0
+            
+            # Add scoring based on available infrastructure data
+            city = self._safe_str(row.get('city', '')).lower()
+            
+            # Major cities have better infrastructure
+            if any(major_city in city for major_city in ['hà nội', 'tp.hcm', 'hồ chí minh']):
+                base_score += 25
+            elif any(big_city in city for big_city in ['đà nẵng', 'hải phòng', 'cần thơ']):
+                base_score += 15
+            
+            return min(base_score, 100.0)
+        except Exception:
+            return 75.0  # Default score
+
     def _get_property_category(self, property_type: str) -> str:
         """Categorize property type"""
-        if any(x in property_type.lower() for x in ['chung cư', 'căn hộ']):
-            return 'Residential'
-        elif any(x in property_type.lower() for x in ['shophouse', 'văn phòng', 'mặt bằng']):
-            return 'Commercial'
-        elif 'đất' in property_type.lower():
-            return 'Land'
-        else:
+        try:
+            property_type = self._safe_str(property_type).lower()
+            
+            if any(x in property_type for x in ['chung cư', 'chung cu', 'căn hộ', 'can ho', 'apartment']):
+                return 'Residential'
+            elif any(x in property_type for x in ['shophouse', 'văn phòng', 'van phong', 'mặt bằng', 'mat bang', 'office', 'commercial']):
+                return 'Commercial'
+            elif any(x in property_type for x in ['đất', 'dat', 'land']):
+                return 'Land'
+            else:
+                return 'Mixed'
+        except Exception:
             return 'Mixed'
-    
+
     def _get_property_segment(self, row) -> str:
         """Get property segment based on price"""
-        price = self._convert_to_numeric(row.get('price_value', 0))
-        if price > 10000000000:  # > 10 tỷ
-            return 'Luxury'
-        elif price > 3000000000:  # > 3 tỷ
-            return 'Mid-range'
-        else:
+        try:
+            price = self._convert_to_numeric(row.get('price_value', 0))
+            if price > 10000000000:  # > 10 tỷ
+                return 'Luxury'
+            elif price > 3000000000:  # > 3 tỷ
+                return 'Mid-range'
+            else:
+                return 'Affordable'
+        except Exception:
             return 'Affordable'
-    
+
     def _get_age_group(self, year_built) -> str:
         """Get age group of property"""
-        if not year_built:
+        try:
+            if pd.isna(year_built) or year_built is None or year_built == '':
+                return 'Unknown'
+            
+            current_year = datetime.now().year
+            year_built = int(float(year_built)) if str(year_built).replace('.', '', 1).isdigit() else 0
+            
+            if year_built <= 0 or year_built > current_year:
+                return 'Unknown'
+            
+            age = current_year - year_built
+            
+            if age <= 2:
+                return 'Mới'
+            elif age <= 10:
+                return '2-10 năm'
+            else:
+                return '>10 năm'
+        except (ValueError, TypeError):
             return 'Unknown'
-        
-        current_year = datetime.now().year
-        age = current_year - int(year_built) if str(year_built).isdigit() else 0
-        
-        if age <= 2:
-            return 'Mới'
-        elif age <= 10:
-            return '2-10 năm'
-        else:
-            return '>10 năm'
-    
+
     def _get_building_type(self, row) -> str:
         """Get building type"""
-        floors = self._convert_to_numeric(row.get('floors', 0))
-        if floors >= 10:
-            return 'High-rise'
-        elif floors >= 5:
-            return 'Mid-rise'
-        else:
+        try:
+            floors = self._convert_to_numeric(row.get('floors', 0))
+            if floors >= 10:
+                return 'High-rise'
+            elif floors >= 5:
+                return 'Mid-rise'
+            else:
+                return 'Low-rise'
+        except Exception:
             return 'Low-rise'
         
     def connect(self):

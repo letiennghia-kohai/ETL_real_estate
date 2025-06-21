@@ -31,28 +31,30 @@ def load_model():
     model = joblib.load('rf_model.pkl')
     return model
     """
-    # Tạo mô hình demo để minh họa
-    from sklearn.preprocessing import LabelEncoder
+    model = joblib.load('rf_model.pkl')
+    return model
+    # # Tạo mô hình demo để minh họa
+    # from sklearn.preprocessing import LabelEncoder
     
-    # Tạo preprocessor giả lập
-    numeric_features = ['area_value', 'bedrooms_value', 'bathrooms_value', 'floors_value',
-                       'road_width_value', 'house_front_value', 'width_value', 'length_value',
-                       'description_length', 'description_word_count', 'amenities_count']
+    # # Tạo preprocessor giả lập
+    # numeric_features = ['area_value', 'bedrooms_value', 'bathrooms_value', 'floors_value',
+    #                    'road_width_value', 'house_front_value', 'width_value', 'length_value',
+    #                    'description_length', 'description_word_count', 'amenities_count']
     
-    categorical_features = ['post_type', 'property_type', 'direction', 'balcony_direction', 'city', 'district']
+    # categorical_features = ['post_type', 'property_type', 'direction', 'balcony_direction', 'city', 'district']
     
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', StandardScaler(), numeric_features),
-            ('cat', OneHotEncoder(drop='first', handle_unknown='ignore'), categorical_features)
-        ])
+    # preprocessor = ColumnTransformer(
+    #     transformers=[
+    #         ('num', StandardScaler(), numeric_features),
+    #         ('cat', OneHotEncoder(drop='first', handle_unknown='ignore'), categorical_features)
+    #     ])
     
-    model = Pipeline([
-        ('preprocessor', preprocessor),
-        ('regressor', RandomForestRegressor(n_estimators=100, random_state=42))
-    ])
+    # model = Pipeline([
+    #     ('preprocessor', preprocessor),
+    #     ('regressor', RandomForestRegressor(n_estimators=100, random_state=42))
+    # ])
     
-    return model, numeric_features, categorical_features
+    # return model, numeric_features, categorical_features
 
 # Load mô hình
 model, numeric_features, categorical_features = load_model()
@@ -115,9 +117,9 @@ with col1:
 
 with col2:
     st.header("Kết quả dự đoán")
-    
+
     if submitted:
-        # Tạo DataFrame từ dữ liệu nhập vào
+        # Tạo DataFrame từ dữ liệu đầu vào
         input_data = pd.DataFrame({
             'area_value': [area_value],
             'post_type': [post_type],
@@ -138,46 +140,45 @@ with col2:
             'district': [district],
             'amenities_count': [amenities_count]
         })
-        
+
         try:
-            # Dự đoán (lưu ý: trong demo này sẽ tạo giá trị ngẫu nhiên)
-            # prediction = model.predict(input_data)[0]
-            
-            # Tạo dự đoán demo dựa trên diện tích và vị trí
-            base_price = area_value * 50_000_000  # 50 triệu/m²
-            city_multiplier = {"Hà Nội": 1.2, "TP. Hồ Chí Minh": 1.5, "Đà Nẵng": 0.8, "Hải Phòng": 0.7, "Cần Thơ": 0.6}
-            property_multiplier = {"Biệt thự": 1.5, "Nhà mặt phố": 1.3, "Nhà riêng": 1.0, "Chung cư": 0.8, "Đất nền": 0.6}
-            
-            prediction = base_price * city_multiplier.get(city, 1.0) * property_multiplier.get(property_type, 1.0)
-            
+            # Load mô hình và bộ xử lý đầu vào (giả sử đã lưu sẵn)
+            model = joblib.load("models/price_predictor.pkl")
+            preprocessor = joblib.load("models/preprocessor.pkl")  # Nếu có
+
+            # Tiền xử lý dữ liệu
+            input_processed = preprocessor.transform(input_data)
+
+            # Dự đoán giá
+            prediction = model.predict(input_processed)[0]
+
             # Hiển thị kết quả
             st.success("Dự đoán thành công!")
-            
-            # Hiển thị giá dự đoán
+
             st.metric(
                 label="Giá dự đoán",
                 value=f"{prediction:,.0f} VNĐ",
                 delta=f"{prediction/area_value:,.0f} VNĐ/m²"
             )
-            
-            # Thống kê bổ sung
+
+            # Thông tin bổ sung
             st.subheader("Thông tin bổ sung")
             st.write(f"**Diện tích:** {area_value} m²")
             st.write(f"**Giá trên m²:** {prediction/area_value:,.0f} VNĐ/m²")
-            st.write(f"**Loại BDS:** {property_type}")
-            st.write(f"**Vị trí:** Cầu Giấy, {city}")
-            
-            # Biểu đồ so sánh (demo)
+            st.write(f"**Loại BĐS:** {property_type}")
+            st.write(f"**Vị trí:** {district}, {city}")
+
+            # Biểu đồ so sánh (giả định giá thị trường = prediction * 0.85)
             chart_data = pd.DataFrame({
-                'Khu vực': ['Trung bình thị trường', 'Dự đoán của bạn'],
-                'Giá (tỷ VNĐ)': [prediction * 0.8 / 1_000_000_000, prediction / 1_000_000_000]
+                'Khu vực': ['Giá thị trường', 'Dự đoán của bạn'],
+                'Giá (tỷ VNĐ)': [prediction * 0.85 / 1_000_000_000, prediction / 1_000_000_000]
             })
-            
+
             st.bar_chart(chart_data.set_index('Khu vực'))
-            
+
         except Exception as e:
             st.error(f"Lỗi khi dự đoán: {str(e)}")
-            st.info("Lưu ý: Đây là ứng dụng demo. Trong thực tế, bạn cần load mô hình đã được huấn luyện.")
+            st.info("Vui lòng đảm bảo model và preprocessor đã được huấn luyện và lưu đúng đường dẫn.")
 
 # Phần thông tin về mô hình
 st.markdown("---")
