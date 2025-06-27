@@ -1,4 +1,5 @@
 import os
+from random import random
 import pandas as pd
 import json
 import re
@@ -29,6 +30,10 @@ class WarehouseLoader:
         self.amenity_cache = {}
         self.contact_cache = {}
         self.source_cache = {}
+        self.legal_key_cache = {}
+        self.structure_key_cache = {}
+        self.amenity_key_cache = {}
+        self.contact_key_cache = {}
         
         # Auto-increment keys
         self.next_location_key = 1
@@ -39,9 +44,31 @@ class WarehouseLoader:
         self.next_contact_key = 1
         self.next_source_key = 1
         self.connection_string = "mysql+pymysql://airflow_user:airflow_password@mysql_container:3306/airflow_db"
-        self.schema_name = 'real_estate_dw'
+        self.schema_name = 'airflow_db'
         self.engine = None
         self.metadata = MetaData()
+        self.amenity_keywords = {
+            'parking': ['bãi đỗ xe', 'chỗ đỗ xe', 'garage', 'parking', 'để xe'],
+            'air_conditioning': ['điều hòa', 'máy lạnh', 'air conditioning', 'ac', 'klimat'],
+            'balcony': ['ban công', 'balcony', 'loggia', 'sân thượng nhỏ'],
+            'elevator': ['thang máy', 'elevator', 'lift', 'thang bộ tự động'],
+            'security': ['bảo vệ', 'an ninh', 'security', 'camera', 'thẻ từ', 'cổng tự động'],
+            'gym': ['phòng gym', 'gym', 'fitness', 'thể dục', 'tập thể hình'],
+            'pool': ['hồ bơi', 'swimming pool', 'pool', 'bể bơi'],
+            'garden': ['sân vườn', 'garden', 'công viên', 'cây xanh', 'không gian xanh']
+        }
+        
+        # Phân loại tiện ích luxury vs basic
+        self.luxury_amenities = [
+            'hồ bơi', 'gym', 'spa', 'sauna', 'sân tennis', 'golf', 'cinema', 
+            'rooftop', 'sky bar', 'concierge', 'valet parking', 'wine cellar',
+            'private elevator', 'maid service', 'housekeeping'
+        ]
+        
+        self.basic_amenities = [
+            'thang máy', 'bảo vệ', 'điều hòa', 'ban công', 'bãi đỗ xe',
+            'internet', 'cable tv', 'water heater', 'kitchen', 'wardrobe'
+        ]
         
     def load_oltp_data_from_staging(self, staging_data_path):
         """
@@ -386,7 +413,7 @@ class WarehouseLoader:
                 'price_value': price_value,
                 'price_per_m2': price_value / area_value if area_value > 0 else None,
                 'price_usd': price_value / 24000 if price_value > 0 else None,  # Rough conversion
-                'price_category': self._categorize_price(price_value),
+                'price_category': 'HIGH',
                 'price_change_pct': None,  # Would need historical data
                 'market_price_ratio': None,  # Would need market averages
                 'created_at': datetime.now(),
@@ -408,11 +435,14 @@ class WarehouseLoader:
             listing_id = row.get('listing_id', '')
             
             # Get matching details
-            detail_row = details_df[details_df['listing_id'] == listing_id].iloc[0] if not details_df.empty and listing_id in details_df['listing_id'].values else {}
-            
+            matched_rows = details_df[details_df['listing_id'] == listing_id]
+            if not matched_rows.empty:
+                detail_row = matched_rows.iloc[0]
+            else:
+                detail_row = {}  # fallback to empty dict
             area_value = self._convert_to_numeric(row.get('area_value', 0))
-            bedrooms = self._convert_to_numeric(detail_row.get('bedrooms', 0) if detail_row else 0)
-            bathrooms = self._convert_to_numeric(detail_row.get('bathrooms', 0) if detail_row else 0)
+            bedrooms = self._convert_to_numeric(detail_row.get('bedrooms', 0) if isinstance(detail_row, (dict, pd.Series)) else 0)
+            bathrooms = self._convert_to_numeric(detail_row.get('bathrooms', 0) if isinstance(detail_row, (dict, pd.Series)) else 0)
             
             fact_data.append({
                 'listing_id': listing_id,
@@ -423,13 +453,13 @@ class WarehouseLoader:
                 'area_value': area_value,
                 'bedrooms_count': bedrooms,
                 'bathrooms_count': bathrooms,
-                'floors_count': self._convert_to_numeric(detail_row.get('floors', 0) if detail_row else 0),
-                'width_value': self._convert_to_numeric(detail_row.get('width', 0) if detail_row else 0),
-                'length_value': self._convert_to_numeric(detail_row.get('length', 0) if detail_row else 0),
-                'road_width_value': self._convert_to_numeric(detail_row.get('road_width', 0) if detail_row else 0),
-                'house_front_value': self._convert_to_numeric(detail_row.get('front_width', 0) if detail_row else 0),
+                'floors_count': self._convert_to_numeric(detail_row.get('floors', 0) if isinstance(detail_row, (dict, pd.Series)) else 0),
+                'width_value': self._convert_to_numeric(detail_row.get('width', 0) if isinstance(detail_row, (dict, pd.Series)) else 0),
+                'length_value': self._convert_to_numeric(detail_row.get('length', 0) if isinstance(detail_row, (dict, pd.Series)) else 0),
+                'road_width_value': self._convert_to_numeric(detail_row.get('road_width', 0) if isinstance(detail_row, (dict, pd.Series)) else 0),
+                'house_front_value': self._convert_to_numeric(detail_row.get('front_width', 0) if isinstance(detail_row, (dict, pd.Series)) else 0),
                 'area_efficiency_ratio': None,  # Would need calculation
-                'area_category': self._categorize_area(area_value),
+                'area_category': 'HIGH',
                 'room_density': (bedrooms + bathrooms) / area_value if area_value > 0 else None,
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
@@ -508,7 +538,7 @@ class WarehouseLoader:
                 'description_length': len(description),
                 'description_word_count': len(description.split()) if description else 0,
                 'title_length': len(title),
-                'days_on_market': self._calculate_days_on_market(row),
+                'days_on_market': None,
                 'view_count': None,  # Not available in current data
                 'contact_count': None,  # Not available in current data
                 # 'listing_quality_score': self._calculate_listing_quality_score(row, listing_media),
@@ -520,10 +550,10 @@ class WarehouseLoader:
                 'save_count': None,  # Not available
                 'share_count': None,  # Not available
                 'is_available': True,  # Assume available
-                'is_featured': self._is_featured_listing(row),
-                'is_urgent': self._is_urgent_listing(row),
-                'has_promotion': self._has_promotion(row),
-                'discount_percentage': self._get_discount_percentage(row),
+                'is_featured': True,
+                'is_urgent': True,
+                'has_promotion': None,
+                'discount_percentage': None,
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             })
@@ -596,7 +626,8 @@ class WarehouseLoader:
         """Create hash for structure dimension"""
         direction = str(row.get('direction', '')).strip() if pd.notna(row.get('direction')) else ''
         balcony_dir = str(row.get('balcony_direction', '')).strip() if pd.notna(row.get('balcony_direction')) else ''
-        structure_type = str(self._get_structure_type(row)).strip()
+        # structure_type = str(self._get_structure_type(row)).strip()
+        structure_type = random.choice(['concrete', 'wood', 'steel', 'brick'])  # Placeholder for actual structure type logic
         layout_type = str(self._get_layout_type(row)).strip()
         
         structure_str = f"{direction}_{balcony_dir}_{structure_type}_{layout_type}"
@@ -986,6 +1017,640 @@ class WarehouseLoader:
         except Exception as e:
             logger.error(f"Failed to create schema: {str(e)}")
             raise
+    def _get_or_create_legal_key(self, row: pd.Series) -> str:
+        """Tạo hoặc lấy legal key duy nhất"""
+        legal_docs = str(row.get('legal_documents', ''))
+        key_input = f"{legal_docs}"
+        
+        if key_input not in self.legal_cache:
+            hash_obj = hashlib.md5(key_input.encode())
+            self.legal_cache[key_input] = f"LEGAL_{hash_obj.hexdigest()[:8].upper()}"
+        
+        return self.legal_cache[key_input]
+    
+    def _categorize_legal_status(self, legal_docs: str) -> str:
+        """Phân loại trạng thái pháp lý"""
+        legal_docs = str(legal_docs).lower()
+        
+        if 'sổ đỏ' in legal_docs or 'sổ hồng' in legal_docs:
+            return 'SỔ ĐỎ/HỒNG'
+        elif 'sổ trắng' in legal_docs:
+            return 'SỔ TRẮNG'
+        elif 'giấy tờ hợp lệ' in legal_docs or 'đầy đủ' in legal_docs:
+            return 'GIẤY TỜ ĐẦY ĐỦ'
+        elif 'đang làm' in legal_docs or 'chờ cấp' in legal_docs:
+            return 'ĐANG XỬ LÝ'
+        else:
+            return 'CHƯA RÕ'
+    
+    def _can_get_bank_loan(self, legal_docs: str) -> bool:
+        """Kiểm tra có thể vay ngân hàng không"""
+        legal_docs = str(legal_docs).lower()
+        
+        loan_keywords = ['sổ đỏ', 'sổ hồng', 'giấy tờ hợp lệ', 'đầy đủ']
+        return any(keyword in legal_docs for keyword in loan_keywords)
+    
+    def _is_transferable(self, legal_docs: str) -> bool:
+        """Kiểm tra có thể chuyển nhượng không"""
+        legal_docs = str(legal_docs).lower()
+        
+        transferable_keywords = ['sổ đỏ', 'sổ hồng', 'chuyển nhượng được']
+        non_transferable_keywords = ['hạn chế', 'không chuyển nhượng', 'tranh chấp']
+        
+        if any(keyword in legal_docs for keyword in non_transferable_keywords):
+            return False
+        
+        return any(keyword in legal_docs for keyword in transferable_keywords)
+    
+    def _assess_legal_risk(self, legal_docs: str) -> str:
+        """Đánh giá mức độ rủi ro pháp lý"""
+        legal_docs = str(legal_docs).lower()
+        
+        high_risk_keywords = ['tranh chấp', 'không rõ nguồn gốc', 'giả mạo']
+        medium_risk_keywords = ['sổ trắng', 'đang làm', 'chờ cấp']
+        low_risk_keywords = ['sổ đỏ', 'sổ hồng', 'giấy tờ hợp lệ']
+        
+        if any(keyword in legal_docs for keyword in high_risk_keywords):
+            return 'CAO'
+        elif any(keyword in legal_docs for keyword in medium_risk_keywords):
+            return 'TRUNG BÌNH'
+        elif any(keyword in legal_docs for keyword in low_risk_keywords):
+            return 'THẤP'
+        else:
+            return 'CHƯA XÁC ĐỊNH'
+    
+    def _calculate_legal_score(self, legal_docs: str) -> float:
+        """Tính điểm pháp lý (0-100)"""
+        legal_docs = str(legal_docs).lower()
+        score = 50  # Điểm cơ bản
+        
+        # Điểm cộng
+        if 'sổ đỏ' in legal_docs or 'sổ hồng' in legal_docs:
+            score += 40
+        elif 'giấy tờ hợp lệ' in legal_docs:
+            score += 30
+        elif 'sổ trắng' in legal_docs:
+            score += 10
+        
+        # Điểm trừ
+        if 'tranh chấp' in legal_docs:
+            score -= 30
+        elif 'không rõ' in legal_docs:
+            score -= 20
+        elif 'đang làm' in legal_docs:
+            score -= 10
+        
+        return max(0, min(100, score))
+    
+    # ==================== STRUCTURE DIMENSION HELPERS ====================
+    
+    def _get_or_create_structure_key(self, row: pd.Series) -> str:
+        """Tạo hoặc lấy structure key duy nhất"""
+        direction = str(row.get('direction', ''))
+        balcony_direction = str(row.get('balcony_direction', ''))
+        structure_type = str(row.get('structure_type', ''))
+        
+        key_input = f"{direction}_{balcony_direction}_{structure_type}"
+        
+        if key_input not in self.structure_key_cache:
+            hash_obj = hashlib.md5(key_input.encode())
+            self.structure_key_cache[key_input] = f"STRUCT_{hash_obj.hexdigest()[:8].upper()}"
+        
+        return self.structure_key_cache[key_input]
+    
+    def _get_structure_type(self, row: pd.Series) -> str:
+        """Xác định loại cấu trúc"""
+        return 'PHONG NGU' # Placeholder for actual logic
+        # Có thể dựa vào các thông tin khác trong row
+        # bedrooms = row.get('bedrooms', 0)
+        # bathrooms = row.get('bathrooms', 0)
+        
+        # if bedrooms == 1:
+        #     return 'STUDIO/1PN'
+        # elif bedrooms == 2:
+        #     return '2 PHÒNG NGỦ'
+        # elif bedrooms == 3:
+        #     return '3 PHÒNG NGỦ'
+        # elif bedrooms >= 4:
+        #     return 'PENTHOUSE/VILLA'
+        # else:
+        #     return 'KHÔNG XÁC ĐỊNH'
+    
+    def _get_layout_type(self, row: pd.Series) -> str:
+        """Xác định kiểu layout"""
+        area = row.get('area', 0)
+        bedrooms = row.get('bedrooms', 0)
+        
+        if area > 0 and bedrooms > 0:
+            area_per_room = area / bedrooms
+            if area_per_room > 25:
+                return 'RỘNG RÃI'
+            elif area_per_room > 15:
+                return 'TIÊU CHUẨN'
+            else:
+                return 'COMPACT'
+        
+        return 'KHÔNG XÁC ĐỊNH'
+    
+    def _calculate_feng_shui_score(self, direction: str) -> float:
+        """Tính điểm phong thủy dựa trên hướng (0-100)"""
+        direction = str(direction).lower()
+        
+        feng_shui_scores = {
+            'đông': 85,
+            'đông nam': 90,
+            'nam': 95,
+            'tây nam': 75,
+            'tây': 60,
+            'tây bắc': 70,
+            'bắc': 80,
+            'đông bắc': 65
+        }
+        
+        for dir_key, score in feng_shui_scores.items():
+            if dir_key in direction:
+                return score
+        
+        return 50  # Điểm mặc định
+    
+    def _calculate_ventilation_score(self, row: pd.Series) -> float:
+        """Tính điểm thông gió (0-100)"""
+        direction = str(row.get('direction', '')).lower()
+        balcony_direction = str(row.get('balcony_direction', '')).lower()
+        
+        score = 50  # Điểm cơ bản
+        
+        # Hướng tốt cho thông gió
+        good_directions = ['đông', 'đông nam', 'nam']
+        if any(dir in direction for dir in good_directions):
+            score += 20
+        
+        # Ban công tốt cho thông gió
+        if any(dir in balcony_direction for dir in good_directions):
+            score += 15
+        
+        # Nếu có nhiều hướng (góc)
+        if 'góc' in direction or len([d for d in good_directions if d in direction]) > 1:
+            score += 10
+        
+        return min(100, score)
+    
+    def _calculate_lighting_score(self, row: pd.Series) -> float:
+        """Tính điểm ánh sáng (0-100)"""
+        direction = str(row.get('direction', '')).lower()
+        
+        score = 50  # Điểm cơ bản
+        
+        # Hướng tốt cho ánh sáng
+        if 'nam' in direction:
+            score += 30
+        elif 'đông' in direction or 'đông nam' in direction:
+            score += 25
+        elif 'tây nam' in direction:
+            score += 15
+        elif 'bắc' in direction:
+            score -= 10
+        
+        return max(0, min(100, score))
+    
+    # ==================== AMENITY DIMENSION HELPERS ====================
+    
+    def _get_or_create_amenity_key(self, amenity_name: str) -> str:
+        """Tạo hoặc lấy amenity key duy nhất"""
+        amenity_name = str(amenity_name)
+        
+        if amenity_name not in self.amenity_key_cache:
+            hash_obj = hashlib.md5(amenity_name.encode())
+            self.amenity_key_cache[amenity_name] = f"AMEN_{hash_obj.hexdigest()[:8].upper()}"
+        
+        return self.amenity_key_cache[amenity_name]
+    
+    def _categorize_amenity(self, amenity_name: str) -> str:
+        """Phân loại tiện ích"""
+        amenity_name = str(amenity_name).lower()
+        
+        security_keywords = ['bảo vệ', 'an ninh', 'camera', 'thẻ từ']
+        fitness_keywords = ['gym', 'hồ bơi', 'thể thao', 'sân tennis']
+        convenience_keywords = ['siêu thị', 'cửa hàng', 'atm', 'cafe']
+        transport_keywords = ['xe bus', 'tàu điện', 'bãi đỗ xe', 'thang máy']
+        
+        if any(keyword in amenity_name for keyword in security_keywords):
+            return 'AN NINH'
+        elif any(keyword in amenity_name for keyword in fitness_keywords):
+            return 'THỂ THAO & GIẢI TRÍ'
+        elif any(keyword in amenity_name for keyword in convenience_keywords):
+            return 'TIỆN ÍCH'
+        elif any(keyword in amenity_name for keyword in transport_keywords):
+            return 'GIAO THÔNG'
+        else:
+            return 'KHÁC'
+    
+    def _get_amenity_type(self, amenity_name: str) -> str:
+        """Xác định loại tiện ích"""
+        amenity_name = str(amenity_name).lower()
+        
+        if 'nội khu' in amenity_name or 'trong tòa' in amenity_name:
+            return 'NỘI KHU'
+        elif 'gần' in amenity_name or 'xung quanh' in amenity_name:
+            return 'BÊN NGOÀI'
+        else:
+            return 'CHUNG'
+    
+    def _get_amenity_value_impact(self, amenity_name: str) -> str:
+        """Đánh giá tác động lên giá trị BDS"""
+        amenity_name = str(amenity_name).lower()
+        
+        high_impact = ['hồ bơi', 'gym', 'an ninh 24/7', 'thang máy']
+        medium_impact = ['siêu thị', 'trường học', 'bệnh viện']
+        low_impact = ['cửa hàng', 'cafe', 'atm']
+        
+        if any(keyword in amenity_name for keyword in high_impact):
+            return 'CAO'
+        elif any(keyword in amenity_name for keyword in medium_impact):
+            return 'TRUNG BÌNH'
+        elif any(keyword in amenity_name for keyword in low_impact):
+            return 'THẤP'
+        else:
+            return 'TRUNG BÌNH'
+    
+    def _calculate_amenity_popularity(self, amenity_name: str, amenities_df: pd.DataFrame) -> float:
+        """Tính điểm phổ biến của tiện ích (0-100)"""
+        if amenities_df.empty:
+            return 50
+        
+        total_properties = len(amenities_df['property_id'].unique()) if 'property_id' in amenities_df.columns else len(amenities_df)
+        amenity_count = len(amenities_df[amenities_df['amenity_name'] == amenity_name])
+        
+        if total_properties > 0:
+            popularity = (amenity_count / total_properties) * 100
+            return min(100, popularity)
+        
+        return 50
+    
+    def _estimate_maintenance_cost(self, amenity_name: str) -> str:
+        """Ước tính chi phí bảo trì"""
+        amenity_name = str(amenity_name).lower()
+        
+        high_cost = ['hồ bơi', 'thang máy', 'gym', 'sân tennis']
+        medium_cost = ['bảo vệ', 'camera', 'điều hòa chung']
+        low_cost = ['thẻ từ', 'cổng tự động', 'đèn led']
+        
+        if any(keyword in amenity_name for keyword in high_cost):
+            return 'CAO'
+        elif any(keyword in amenity_name for keyword in medium_cost):
+            return 'TRUNG BÌNH'
+        elif any(keyword in amenity_name for keyword in low_cost):
+            return 'THẤP'
+        else:
+            return 'TRUNG BÌNH'
+    
+    # ==================== CONTACT DIMENSION HELPERS ====================
+    
+    def _get_or_create_contact_key(self, row: pd.Series) -> str:
+        """Tạo hoặc lấy contact key duy nhất"""
+        phone = str(row.get('phone', ''))
+        email = str(row.get('email', ''))
+        name = str(row.get('name', ''))
+        
+        key_input = f"{phone}_{email}_{name}"
+        
+        if key_input not in self.contact_key_cache:
+            hash_obj = hashlib.md5(key_input.encode())
+            self.contact_key_cache[key_input] = f"CONT_{hash_obj.hexdigest()[:8].upper()}"
+        
+        return self.contact_key_cache[key_input]
+    
+    def _is_agent(self, row: pd.Series) -> bool:
+        """Kiểm tra có phải môi giới không"""
+        contact_type = str(row.get('contact_type', '')).lower()
+        name = str(row.get('name', '')).lower()
+        
+        agent_keywords = ['môi giới', 'agent', 'broker', 'sale']
+        return any(keyword in contact_type for keyword in agent_keywords) or \
+               any(keyword in name for keyword in agent_keywords)
+    
+    def _is_company(self, row: pd.Series) -> bool:
+        """Kiểm tra có phải công ty không"""
+        name = str(row.get('name', '')).lower()
+        contact_type = str(row.get('contact_type', '')).lower()
+        
+        company_keywords = ['công ty', 'ctcp', 'tnhh', 'jsc', 'ltd', 'company']
+        return any(keyword in name for keyword in company_keywords) or \
+               'công ty' in contact_type
+    
+    def _get_agent_level(self, row: pd.Series) -> str:
+        """Xác định cấp độ môi giới"""
+        if not self._is_agent(row):
+            return 'KHÔNG PHẢI MG'
+        
+        name = str(row.get('name', '')).lower()
+        
+        if 'senior' in name or 'trưởng' in name:
+            return 'SENIOR'
+        elif 'junior' in name or 'mới' in name:
+            return 'JUNIOR'
+        else:
+            return 'STANDARD'
+    
+    def _get_company_size(self, row: pd.Series) -> str:
+        """Ước tính quy mô công ty"""
+        if not self._is_company(row):
+            return 'CÁ NHÂN'
+        
+        name = str(row.get('name', '')).lower()
+        
+        if any(keyword in name for keyword in ['tập đoàn', 'group', 'holdings']):
+            return 'LỚN'
+        elif any(keyword in name for keyword in ['ctcp', 'jsc']):
+            return 'TRUNG BÌNH'
+        else:
+            return 'NHỎ'
+    
+    def _estimate_experience_years(self, row: pd.Series) -> int:
+        """Ước tính số năm kinh nghiệm"""
+        # Đây là ước tính dựa trên thông tin có sẵn
+        # Trong thực tế cần thêm dữ liệu về lịch sử hoạt động
+        
+        if self._is_company(row):
+            company_size = self._get_company_size(row)
+            if company_size == 'LỚN':
+                return 10
+            elif company_size == 'TRUNG BÌNH':
+                return 5
+            else:
+                return 2
+        elif self._is_agent(row):
+            agent_level = self._get_agent_level(row)
+            if agent_level == 'SENIOR':
+                return 7
+            elif agent_level == 'JUNIOR':
+                return 1
+            else:
+                return 3
+        else:
+            return 1  # Chủ nhà thường ít kinh nghiệm
+    
+    def _estimate_listing_count(self, row: pd.Series) -> int:
+        """Ước tính số tin đăng"""
+        experience = self._estimate_experience_years(row)
+        
+        if self._is_company(row):
+            return experience * 50  # Công ty có nhiều tin hơn
+        elif self._is_agent(row):
+            return experience * 20  # Môi giới cá nhân
+        else:
+            return 1  # Chủ nhà thường chỉ có 1 tin
+    
+    def _estimate_success_rate(self, row: pd.Series) -> float:
+        """Ước tính tỷ lệ thành công (0-100)"""
+        experience = self._estimate_experience_years(row)
+        
+        # Tỷ lệ thành công tăng theo kinh nghiệm nhưng có giới hạn
+        base_rate = 30
+        experience_bonus = min(experience * 5, 40)  # Tối đa 40 điểm từ kinh nghiệm
+        
+        if self._is_company(row):
+            company_bonus = 15
+        elif self._is_agent(row):
+            company_bonus = 10
+        else:
+            company_bonus = 0
+        
+        return min(100, base_rate + experience_bonus + company_bonus)
+    
+    def _get_rating(self, row: pd.Series) -> float:
+        """Ước tính rating (1-5 sao)"""
+        success_rate = self._estimate_success_rate(row)
+        
+        # Chuyển đổi success rate thành rating 1-5
+        if success_rate >= 80:
+            return 5.0
+        elif success_rate >= 70:
+            return 4.5
+        elif success_rate >= 60:
+            return 4.0
+        elif success_rate >= 50:
+            return 3.5
+        elif success_rate >= 40:
+            return 3.0
+        elif success_rate >= 30:
+            return 2.5
+        else:
+            return 2.0
+    def _calculate_amenity_score(self, listing_amenities: pd.DataFrame) -> float:
+        """Tính điểm tổng thể cho tiện ích (0-100)"""
+        if listing_amenities.empty:
+            return 0.0
+        
+        total_score = 0
+        amenity_count = len(listing_amenities)
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            
+            # Điểm cơ bản cho mỗi tiện ích
+            base_score = 5
+            
+            # Điểm thưởng cho tiện ích luxury
+            luxury_bonus = 0
+            for luxury_amenity in self.luxury_amenities:
+                if luxury_amenity.lower() in amenity_name:
+                    luxury_bonus = 15
+                    break
+            
+            # Điểm thưởng cho tiện ích phổ biến/quan trọng
+            important_bonus = 0
+            important_amenities = ['thang máy', 'bảo vệ', 'điều hòa', 'bãi đỗ xe']
+            for important_amenity in important_amenities:
+                if important_amenity in amenity_name:
+                    important_bonus = 8
+                    break
+            
+            amenity_score = base_score + luxury_bonus + important_bonus
+            total_score += amenity_score
+        
+        # Tính điểm trung bình và chuẩn hóa về thang 100
+        if amenity_count > 0:
+            avg_score = total_score / amenity_count
+            # Chuẩn hóa: giả sử điểm tối đa mỗi tiện ích là 20
+            normalized_score = min(100, (avg_score / 20) * 100)
+            return round(normalized_score, 2)
+        
+        return 0.0
+    
+    def _has_amenity(self, listing_amenities: pd.DataFrame, amenity_type: str) -> bool:
+        """Kiểm tra listing có tiện ích cụ thể hay không"""
+        if listing_amenities.empty:
+            return False
+        
+        keywords = self.amenity_keywords.get(amenity_type, [])
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            
+            for keyword in keywords:
+                if keyword.lower() in amenity_name:
+                    return True
+        
+        return False
+    
+    def _count_luxury_amenities(self, listing_amenities: pd.DataFrame) -> int:
+        """Đếm số lượng tiện ích luxury"""
+        if listing_amenities.empty:
+            return 0
+        
+        luxury_count = 0
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            
+            for luxury_amenity in self.luxury_amenities:
+                if luxury_amenity.lower() in amenity_name:
+                    luxury_count += 1
+                    break  # Tránh đếm trùng cho cùng một amenity
+        
+        return luxury_count
+    
+    def _count_basic_amenities(self, listing_amenities: pd.DataFrame) -> int:
+        """Đếm số lượng tiện ích basic"""
+        if listing_amenities.empty:
+            return 0
+        
+        basic_count = 0
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            
+            for basic_amenity in self.basic_amenities:
+                if basic_amenity.lower() in amenity_name:
+                    basic_count += 1
+                    break  # Tránh đếm trùng cho cùng một amenity
+        
+        return basic_count
+    
+    def _calculate_amenity_premium(self, listing_amenities: pd.DataFrame) -> float:
+        """Tính phần trăm tăng giá do tiện ích (%)"""
+        if listing_amenities.empty:
+            return 0.0
+        
+        premium_percentage = 0.0
+        
+        # Định nghĩa mức tăng giá cho từng loại tiện ích
+        amenity_premiums = {
+            'hồ bơi': 8.0,
+            'gym': 5.0,
+            'spa': 6.0,
+            'sân tennis': 10.0,
+            'thang máy': 3.0,
+            'bảo vệ 24/7': 4.0,
+            'bãi đỗ xe': 2.0,
+            'điều hòa': 1.5,
+            'ban công': 2.5,
+            'sân vườn': 4.0,
+            'view đẹp': 7.0,
+            'gần trung tâm': 5.0
+        }
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            
+            # Tìm mức premium phù hợp
+            for amenity_key, premium_value in amenity_premiums.items():
+                if amenity_key.lower() in amenity_name:
+                    premium_percentage += premium_value
+                    break
+            else:
+                # Nếu không tìm thấy trong danh sách, gán premium mặc định
+                premium_percentage += 1.0
+        
+        # Giới hạn premium tối đa là 50%
+        return min(50.0, round(premium_percentage, 2))
+    
+    def _analyze_amenity_trends(self, listing_amenities: pd.DataFrame) -> Dict[str, Any]:
+        """Phân tích xu hướng tiện ích (hàm bổ sung)"""
+        if listing_amenities.empty:
+            return {
+                'most_common_amenity': None,
+                'amenity_diversity_score': 0,
+                'modern_amenities_ratio': 0
+            }
+        
+        # Đếm tần suất xuất hiện của các tiện ích
+        amenity_counts = {}
+        modern_count = 0
+        total_count = len(listing_amenities)
+        
+        modern_amenities = ['smart home', 'wifi', 'charging station', 'app control', 'iot']
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            
+            # Đếm tần suất
+            amenity_counts[amenity_name] = amenity_counts.get(amenity_name, 0) + 1
+            
+            # Đếm tiện ích hiện đại
+            for modern_amenity in modern_amenities:
+                if modern_amenity in amenity_name:
+                    modern_count += 1
+                    break
+        
+        # Tìm tiện ích phổ biến nhất
+        most_common = max(amenity_counts.items(), key=lambda x: x[1])[0] if amenity_counts else None
+        
+        # Tính điểm đa dạng (số loại tiện ích khác nhau / tổng số tiện ích)
+        diversity_score = len(amenity_counts) / total_count if total_count > 0 else 0
+        
+        # Tỷ lệ tiện ích hiện đại
+        modern_ratio = modern_count / total_count if total_count > 0 else 0
+        
+        return {
+            'most_common_amenity': most_common,
+            'amenity_diversity_score': round(diversity_score, 3),
+            'modern_amenities_ratio': round(modern_ratio, 3)
+        }
+    
+    def _calculate_amenity_market_value(self, listing_amenities: pd.DataFrame, base_price: float = 0) -> float:
+        """Tính giá trị thị trường của các tiện ích"""
+        if listing_amenities.empty or base_price <= 0:
+            return 0.0
+        
+        premium_percentage = self._calculate_amenity_premium(listing_amenities)
+        return base_price * (premium_percentage / 100)
+    
+    def _get_amenity_category_distribution(self, listing_amenities: pd.DataFrame) -> Dict[str, int]:
+        """Phân bố các category tiện ích"""
+        if listing_amenities.empty:
+            return {}
+        
+        categories = {
+            'an_ninh': 0,
+            'giai_tri': 0,
+            'tien_ich': 0,
+            'giao_thong': 0,
+            'khac': 0
+        }
+        
+        category_keywords = {
+            'an_ninh': ['bảo vệ', 'camera', 'an ninh', 'thẻ từ'],
+            'giai_tri': ['hồ bơi', 'gym', 'sân chơi', 'rạp phim'],
+            'tien_ich': ['siêu thị', 'atm', 'nhà hàng', 'cafe'],
+            'giao_thong': ['bãi đỗ xe', 'thang máy', 'xe bus', 'tàu điện']
+        }
+        
+        for _, amenity_row in listing_amenities.iterrows():
+            amenity_name = str(amenity_row.get('amenity_name', '')).lower()
+            categorized = False
+            
+            for category, keywords in category_keywords.items():
+                if any(keyword in amenity_name for keyword in keywords):
+                    categories[category] += 1
+                    categorized = True
+                    break
+            
+            if not categorized:
+                categories['khac'] += 1
+        
+        return categories
     
     def create_dimension_tables(self):
         """Create all dimension tables"""
@@ -993,19 +1658,19 @@ class WarehouseLoader:
         # Dimension Time
         dim_time = Table(
             'dim_time', self.metadata,
-            Column('time_key', Integer, primary_key=True),
-            Column('full_date', Date, nullable=False),
+            Column('time_key', String(255), primary_key=True),
+            Column('full_date', Date),
             Column('year', Integer),
             Column('quarter', Integer),
             Column('month', Integer),
-            Column('month_name', String(20)),
+            Column('month_name', String(255)),
             Column('week', Integer),
             Column('day_of_month', Integer),
             Column('day_of_week', Integer),
-            Column('day_name', String(20)),
+            Column('day_name', String(255)),
             Column('is_weekend', Boolean),
             Column('is_holiday', Boolean),
-            Column('season', String(20)),
+            Column('season', String(255)),
             Column('fiscal_year', Integer),
             Column('fiscal_quarter', Integer),
             schema=self.schema_name
@@ -1014,14 +1679,14 @@ class WarehouseLoader:
         # Dimension Location
         dim_location = Table(
             'dim_location', self.metadata,
-            Column('location_key', Integer, primary_key=True),
-            Column('city', String(100)),
-            Column('district', String(100)),
-            Column('ward', String(100)),
+            Column('location_key', String(255), primary_key=True),
+            Column('city', String(255)),
+            Column('district', String(255)),
+            Column('ward', String(255)),
             Column('street', String(200)),
             Column('project_name', String(200)),
-            Column('region', String(50)),
-            Column('city_tier', String(20)),
+            Column('region', String(255)),
+            Column('city_tier', String(255)),
             Column('location_score', DECIMAL(5, 2)),
             Column('infrastructure_score', DECIMAL(5, 2)),
             Column('full_address', Text),
@@ -1033,26 +1698,26 @@ class WarehouseLoader:
         # Dimension Property
         dim_property = Table(
             'dim_property', self.metadata,
-            Column('property_key', Integer, primary_key=True),
-            Column('property_type', String(100)),
-            Column('property_subtype', String(100)),
-            Column('property_category', String(50)),
-            Column('property_segment', String(50)),
-            Column('age_group', String(50)),
-            Column('building_type', String(50)),
-            Column('ownership_type', String(100)),
+            Column('property_key',String(255), primary_key=True),
+            Column('property_type', String(255)),
+            Column('property_subtype', String(255)),
+            Column('property_category', String(255)),
+            Column('property_segment', String(255)),
+            Column('age_group', String(255)),
+            Column('building_type', String(255)),
+            Column('ownership_type', String(255)),
             schema=self.schema_name
         )
         
         # Dimension Legal
         dim_legal = Table(
             'dim_legal', self.metadata,
-            Column('legal_key', Integer, primary_key=True),
+            Column('legal_key', String(255), primary_key=True),
             Column('legal_status', String(200)),
-            Column('legal_category', String(100)),
+            Column('legal_category', String(255)),
             Column('can_get_loan', Boolean),
             Column('transferable', Boolean),
-            Column('legal_risk_level', String(50)),
+            Column('legal_risk_level', String(255)),
             Column('legal_score', DECIMAL(5, 2)),
             schema=self.schema_name
         )
@@ -1060,11 +1725,11 @@ class WarehouseLoader:
         # Dimension Structure
         dim_structure = Table(
             'dim_structure', self.metadata,
-            Column('structure_key', Integer, primary_key=True),
-            Column('direction', String(50)),
-            Column('balcony_direction', String(50)),
-            Column('structure_type', String(100)),
-            Column('layout_type', String(100)),
+            Column('structure_key', String(255), primary_key=True),
+            Column('direction', String(255)),
+            Column('balcony_direction', String(255)),
+            Column('structure_type', String(255)),
+            Column('layout_type', String(255)),
             Column('feng_shui_score', DECIMAL(5, 2)),
             Column('ventilation_score', DECIMAL(5, 2)),
             Column('lighting_score', DECIMAL(5, 2)),
@@ -1074,25 +1739,25 @@ class WarehouseLoader:
         # Dimension Amenity
         dim_amenity = Table(
             'dim_amenity', self.metadata,
-            Column('amenity_key', Integer, primary_key=True),
+            Column('amenity_key', String(255), primary_key=True),
             Column('amenity_name', String(200)),
-            Column('amenity_category', String(100)),
-            Column('amenity_type', String(100)),
-            Column('value_impact', String(50)),
+            Column('amenity_category', String(255)),
+            Column('amenity_type', String(255)),
+            Column('value_impact', String(255)),
             Column('popularity_score', DECIMAL(5, 2)),
-            Column('maintenance_cost', DECIMAL(12, 2)),
+            Column('maintenance_cost', String(255)),
             schema=self.schema_name
         )
         
         # Dimension Contact
         dim_contact = Table(
             'dim_contact', self.metadata,
-            Column('contact_key', Integer, primary_key=True),
-            Column('contact_type', String(100)),
+            Column('contact_key', String(255), primary_key=True),
+            Column('contact_type', String(255)),
             Column('is_agent', Boolean),
             Column('is_company', Boolean),
-            Column('agent_level', String(50)),
-            Column('company_size', String(50)),
+            Column('agent_level', String(255)),
+            Column('company_size', String(255)),
             Column('experience_years', Integer),
             Column('listing_count', Integer),
             Column('success_rate', DECIMAL(5, 2)),
@@ -1103,12 +1768,12 @@ class WarehouseLoader:
         # Dimension Source
         dim_source = Table(
             'dim_source', self.metadata,
-            Column('source_key', Integer, primary_key=True),
+            Column('source_key', String(255), primary_key=True),
             Column('source_name', String(200)),
-            Column('source_type', String(100)),
+            Column('source_type', String(255)),
             Column('reliability_score', DECIMAL(5, 2)),
             Column('data_quality_score', DECIMAL(5, 2)),
-            Column('update_frequency', String(50)),
+            Column('update_frequency', String(255)),
             Column('premium_source', Boolean),
             schema=self.schema_name
         )
@@ -1126,16 +1791,16 @@ class WarehouseLoader:
         # Fact Price Analysis
         fact_price_analysis = Table(
             'fact_price_analysis', self.metadata,
-            Column('price_fact_id', BIGINT, primary_key=True, autoincrement=True),
-            Column('listing_id', String(100), nullable=False),
-            Column('time_key', Integer, nullable=False),
-            Column('location_key', Integer, nullable=False),
-            Column('property_key', Integer, nullable=False),
+            Column('price_fact_id', Integer, primary_key=True, autoincrement=True),
+            Column('listing_id', String(255)),
+            Column('time_key', Integer),
+            Column('location_key', Integer),
+            Column('property_key', Integer),
             Column('legal_key', Integer),
             Column('price_value', DECIMAL(15, 2)),
             Column('price_per_m2', DECIMAL(12, 2)),
             Column('price_usd', DECIMAL(12, 2)),
-            Column('price_category', String(50)),
+            Column('price_category', String(255)),
             Column('price_change_pct', DECIMAL(8, 4)),
             Column('market_price_ratio', DECIMAL(8, 4)),
             Column('created_at', DateTime, default=datetime.now),
@@ -1146,11 +1811,11 @@ class WarehouseLoader:
         # Fact Area Analysis
         fact_area_analysis = Table(
             'fact_area_analysis', self.metadata,
-            Column('area_fact_id', BIGINT, primary_key=True, autoincrement=True),
-            Column('listing_id', String(100), nullable=False),
-            Column('time_key', Integer, nullable=False),
-            Column('location_key', Integer, nullable=False),
-            Column('property_key', Integer, nullable=False),
+            Column('area_fact_id', Integer, primary_key=True, autoincrement=True),
+            Column('listing_id', String(255)),
+            Column('time_key', Integer),
+            Column('location_key', Integer),
+            Column('property_key', Integer),
             Column('structure_key', Integer),
             Column('area_value', DECIMAL(10, 2)),
             Column('bedrooms_count', Integer),
@@ -1161,7 +1826,7 @@ class WarehouseLoader:
             Column('road_width_value', DECIMAL(8, 2)),
             Column('house_front_value', DECIMAL(8, 2)),
             Column('area_efficiency_ratio', DECIMAL(6, 4)),
-            Column('area_category', String(50)),
+            Column('area_category', String(255)),
             Column('room_density', DECIMAL(8, 4)),
             Column('created_at', DateTime, default=datetime.now),
             Column('updated_at', DateTime, default=datetime.now, onupdate=datetime.now),
@@ -1171,11 +1836,11 @@ class WarehouseLoader:
         # Fact Amenities Analysis
         fact_amenities_analysis = Table(
             'fact_amenities_analysis', self.metadata,
-            Column('amenity_fact_id', String(100), primary_key=True),
-            Column('listing_id', String(100), nullable=False),
-            Column('time_key', Integer, nullable=False),
-            Column('location_key', Integer, nullable=False),
-            Column('property_key', Integer, nullable=False),
+            Column('amenity_fact_id', String(255), primary_key=True),
+            Column('listing_id', String(255)),
+            Column('time_key', Integer),
+            Column('location_key', Integer),
+            Column('property_key', Integer),
             Column('amenity_key', Integer),
             Column('amenities_count', Integer),
             Column('amenity_score', DECIMAL(8, 2)),
@@ -1198,13 +1863,13 @@ class WarehouseLoader:
         # Fact Listing Analysis
         fact_listing_analysis = Table(
             'fact_listing_analysis', self.metadata,
-            Column('listing_fact_id', BIGINT, primary_key=True, autoincrement=True),
-            Column('listing_id', String(100), nullable=False, unique=True),
-            Column('time_key', Integer, nullable=False),
-            Column('location_key', Integer, nullable=False),
-            Column('property_key', Integer, nullable=False),
+            Column('listing_fact_id',Integer, primary_key=True, autoincrement=True),
+            Column('listing_id', String(255), unique=True),
+            Column('time_key', Integer),
+            Column('location_key', Integer),
+            Column('property_key', Integer),
             Column('contact_key', Integer),
-            Column('source_key', Integer, nullable=False),
+            Column('source_key', Integer),
             Column('description_length', Integer),
             Column('description_word_count', Integer),
             Column('title_length', Integer),
@@ -1286,10 +1951,21 @@ class WarehouseLoader:
         if not self.engine:
             self.connect()
         
-        self.create_schema_if_not_exists()
+        # self.create_schema_if_not_exists()
+        # Drop all tables in the metadata
+        logger.info("Dropping all existing OLAP tables...")
+        self.metadata.reflect(bind=self.engine, schema=self.schema_name)
+        self.metadata.drop_all(bind=self.engine, checkfirst=True)
+        logger.info("All OLAP tables dropped successfully.")
+
+        # Clear metadata
+        self.metadata.clear()
+
+        # Recreate all tables
+        logger.info("Creating fresh OLAP tables...")
         self.create_dimension_tables()
         self.create_fact_tables()
-        self.create_indexes()
+        # self.create_indexes()
         
         # Load dimension tables first (due to foreign key relationships)
         dimension_tables = [
@@ -1319,9 +1995,10 @@ class WarehouseLoader:
             # Clean data before loading
             df_cleaned = self._clean_dataframe(df)
             
+            
             # Use upsert strategy for dimension tables, insert for fact tables
             if table_name.startswith('dim_'):
-                self._upsert_data(table_name, df_cleaned, batch_size)
+                self._insert_data(table_name, df_cleaned, batch_size)
             else:
                 self._insert_data(table_name, df_cleaned, batch_size)
                 
@@ -1355,12 +2032,11 @@ class WarehouseLoader:
         # Clear existing data for the keys we're about to insert
         if pk_col and pk_col in df.columns:
             keys_to_delete = df[pk_col].unique().tolist()
-            keys_str = ','.join([str(k) for k in keys_to_delete])
-            
+            keys_str = ','.join([f"'{str(k)}'" for k in keys_to_delete])  # <-- bọc giá trị trong dấu nháy
+
             with self.engine.connect() as conn:
                 delete_sql = f"DELETE FROM `{self.schema_name}`.{table_name} WHERE {pk_col} IN ({keys_str})"
                 conn.execute(text(delete_sql))
-                conn.commit()
         
         # Insert new data
         self._insert_data(table_name, df, batch_size)
@@ -1405,7 +2081,7 @@ class WarehouseLoader:
         try:
             with self.engine.connect() as conn:
                 conn.execute(text(f"TRUNCATE TABLE `{self.schema_name}`.{table_name}"))
-                conn.commit()
+                # conn.commit()
             logger.info(f"Truncated table {table_name}")
         except Exception as e:
             logger.error(f"Failed to truncate table {table_name}: {str(e)}")

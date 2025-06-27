@@ -180,6 +180,7 @@ def extract_data(website_info, ds_nodash):
     
     # Tạo thư mục nếu chưa tồn tại
     os.makedirs(f"data/raw/{website_info['name']}", exist_ok=True)
+    logging.info(f"Đã tạo thư mục: data/raw/{website_info['name']}/{website_info['name']}_{ds_nodash}.json")
     
     # Lưu dữ liệu thô vào raw data
     raw_data_path = f"data/raw/{website_info['name']}/{website_info['name']}_{ds_nodash}.json"
@@ -246,7 +247,11 @@ def load_data_to_json(staging_data_path):
     """
     Hàm tải dữ liệu vào kho JSON cho mô hình dự đoán
     """
-    json_loader = JsonLoader()
+    connection_string = "mongodb+srv://mongodb:mongodb@cluster0.eiuib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+    json_loader = JsonLoader(connection_string)
+    json_loader.load(staging_data_path)
+    json_loader.load_data_to_json(staging_data_path)
     
     # Tạo thư mục nếu chưa tồn tại
     os.makedirs("data/warehouse/json", exist_ok=True)

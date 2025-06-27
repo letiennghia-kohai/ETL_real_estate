@@ -6,3 +6,4 @@ webdriver-manager>=3.8.6
 pandas>=1.5.3
 numpy>=1.23.5
 mysqlclient>=2.1.1
+pymongo>=4.13.1

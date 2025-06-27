@@ -7,6 +7,8 @@ from sqlalchemy import create_engine
 import json
 from sqlalchemy import text
 from airflow.hooks.mysql_hook import MySqlHook
+from airflow.hooks.base import BaseHook
+from sqlalchemy import create_engine
 class DataProcessor:
     def __init__(self, output_dir="processed_data"):
         """
@@ -338,13 +340,15 @@ class UnifiedDataProcessor:
         """
         try:
             # Kết nối với MySQL qua Airflow Connection
-            mysql_hook = MySqlHook(mysql_conn_id='mysql_real_estate')
+            conn = BaseHook.get_connection("mysql_real_estate")
 
-            # Lấy SQLAlchemy engine
-            engine = mysql_hook.get_sqlalchemy_engine()
+            # Tạo connection string thủ công dùng pymysql
+            connection_string = f"mysql+pymysql://{conn.login}:{conn.password}@{conn.host}:{conn.port}/{conn.schema}"
+            engine = create_engine(connection_string)
 
             # Đường dẫn thư mục dữ liệu
             processed_dir = f"data/staging/proceed/{ds_nodash}"
+
             # timestamped_dirs = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
             # if not timestamped_dirs:
             #     raise ValueError(f"Không tìm thấy thư mục dữ liệu trong {processed_dir}")
@@ -370,13 +374,18 @@ class UnifiedDataProcessor:
 
             # Tạo bảng
             with engine.connect() as conn:
+                from sqlalchemy import inspect
+                inspector = inspect(engine)
                 for table_name, create_sql in table_schemas.items():
                     try:
+                        if table_name in inspector.get_table_names():
+                            logging.info(f"Bảng {table_name} đã tồn tại, bỏ qua.")
+                            continue
                         conn.execute(text(create_sql))
                         # conn.commit()
                         logging.info(f"Đã tạo/kiểm tra bảng: {table_name}")
                     except Exception as e:
-                        logging.warning(f"Lỗi khi tạo bảng {table_name}: {str(e)}")
+                        logging.info(f"Lỗi khi tạo bảng {table_name}: {str(e)}")
 
             # Load CSV vào MySQL
             loaded_tables = []
@@ -623,26 +632,77 @@ class UnifiedDataProcessor:
         """
 
     def create_unified_table_sql(self):
-        """Tạo SQL cho bảng unified_data (MySQL style)"""
+        """Tạo SQL cho bảng unified_data với đầy đủ schema (MySQL style)"""
         return """
         CREATE TABLE IF NOT EXISTS unified_data (
             id INT AUTO_INCREMENT PRIMARY KEY,
             listing_id VARCHAR(255) UNIQUE,
-            title TEXT,
-            price DECIMAL(15,2),
-            area DECIMAL(10,2),
-            property_type VARCHAR(100),
-            bedrooms INT,
-            bathrooms INT,
-            street VARCHAR(255),
-            ward VARCHAR(255),
-            district VARCHAR(255),
-            city VARCHAR(255),
-            description TEXT,
-            contact_name VARCHAR(255),
-            phone_number VARCHAR(50),
-            source VARCHAR(50),
+            bds_id VARCHAR(255),
+            source_id VARCHAR(50),
             url TEXT,
+            title TEXT,
+            scraped_at DATETIME,
+            price_text VARCHAR(100),
+            price_value DECIMAL(15, 2),
+            price_unit VARCHAR(50),
+            price_per_m2 DECIMAL(15, 2),
+            area_text VARCHAR(100),
+            area_value DECIMAL(10, 2),
+            address TEXT,
+            post_date DATETIME,
+            expiration_date DATETIME,
+            post_type VARCHAR(100),
+            property_type VARCHAR(100),
+            is_available BOOLEAN,
+            raw_data VARCHAR(500),
+            property_details VARCHAR(500),
+            description TEXT,
+            description_length INT,
+            description_word_count INT,
+            bedrooms VARCHAR(50),
+            bedrooms_value INT,
+            bathrooms VARCHAR(50),
+            bathrooms_value INT,
+            legal_status VARCHAR(100),
+            floors VARCHAR(50),
+            floors_value INT,
+            direction VARCHAR(100),
+            balcony_direction VARCHAR(100),
+            road_width VARCHAR(50),
+            road_width_value DECIMAL(10,2),
+            house_front VARCHAR(50),
+            house_front_value DECIMAL(10,2),
+            width VARCHAR(50),
+            width_value DECIMAL(10,2),
+            length VARCHAR(50),
+            length_value DECIMAL(10,2),
+            project VARCHAR(255),
+            furniture VARCHAR(255),
+            raw_details VARCHAR(255),
+            full_address TEXT,
+            city VARCHAR(100),
+            district VARCHAR(100),
+            ward VARCHAR(100),
+            street VARCHAR(255),
+            project_name VARCHAR(255),
+            address_normalized TEXT,
+            amenities_list VARCHAR(255),
+            amenities_count INT,
+            view_types VARCHAR(255),
+            discount_percentage DECIMAL(5,2),
+            loan_support_percentage DECIMAL(5,2),
+            promotions VARCHAR(255),
+            has_promotions BOOLEAN,
+            contact_id VARCHAR(255),
+            contact_name VARCHAR(255),
+            contact_phone VARCHAR(50),
+            contact_phone_extracted VARCHAR(50),
+            is_phone_masked BOOLEAN,
+            contact_email VARCHAR(255),
+            contact_address VARCHAR(255),
+            contact_company VARCHAR(255),
+            is_agent BOOLEAN,
+            raw_contact VARCHAR(255),
             batch_date VARCHAR(20),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );

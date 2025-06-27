@@ -31,7 +31,7 @@ def load_model():
     model = joblib.load('rf_model.pkl')
     return model
     """
-    model = joblib.load('rf_model.pkl')
+    model = joblib.load('D://github//ETL_real_estate//notebooks//rf_model.pkl')
     return model
     # # Tạo mô hình demo để minh họa
     # from sklearn.preprocessing import LabelEncoder
@@ -57,7 +57,7 @@ def load_model():
     # return model, numeric_features, categorical_features
 
 # Load mô hình
-model, numeric_features, categorical_features = load_model()
+model  = load_model()
 
 # Layout chính
 col1, col2 = st.columns([2, 1])
@@ -143,37 +143,41 @@ with col2:
 
         try:
             # Load mô hình và bộ xử lý đầu vào (giả sử đã lưu sẵn)
-            model = joblib.load("models/price_predictor.pkl")
-            preprocessor = joblib.load("models/preprocessor.pkl")  # Nếu có
+            model = load_model()
+            # preprocessor = joblib.load("models/preprocessor.pkl")  # Nếu có
 
             # Tiền xử lý dữ liệu
-            input_processed = preprocessor.transform(input_data)
+            # input_processed = preprocessor.transform(input_data)
 
             # Dự đoán giá
-            prediction = model.predict(input_processed)[0]
+            # Dự đoán (log giá)
+            prediction = model.predict(input_data)
+            log_price_pred = prediction[0]
+
+            # Biến đổi ngược lại thành giá thật
+            predicted_price = np.expm1(log_price_pred)
 
             # Hiển thị kết quả
             st.success("Dự đoán thành công!")
 
             st.metric(
                 label="Giá dự đoán",
-                value=f"{prediction:,.0f} VNĐ",
-                delta=f"{prediction/area_value:,.0f} VNĐ/m²"
+                value=f"{predicted_price:,.0f} VNĐ",
+                delta=f"{predicted_price / area_value:,.0f} VNĐ/m²"
             )
 
             # Thông tin bổ sung
             st.subheader("Thông tin bổ sung")
             st.write(f"**Diện tích:** {area_value} m²")
-            st.write(f"**Giá trên m²:** {prediction/area_value:,.0f} VNĐ/m²")
+            st.write(f"**Giá trên m²:** {predicted_price / area_value:,.0f} VNĐ/m²")
             st.write(f"**Loại BĐS:** {property_type}")
             st.write(f"**Vị trí:** {district}, {city}")
 
-            # Biểu đồ so sánh (giả định giá thị trường = prediction * 0.85)
+            # Biểu đồ so sánh
             chart_data = pd.DataFrame({
                 'Khu vực': ['Giá thị trường', 'Dự đoán của bạn'],
-                'Giá (tỷ VNĐ)': [prediction * 0.85 / 1_000_000_000, prediction / 1_000_000_000]
+                'Giá (tỷ VNĐ)': [predicted_price * 0.85 / 1_000_000_000, predicted_price / 1_000_000_000]
             })
-
             st.bar_chart(chart_data.set_index('Khu vực'))
 
         except Exception as e:

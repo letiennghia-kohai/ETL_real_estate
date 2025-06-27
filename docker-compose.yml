@@ -29,7 +29,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5 
-
+  phpmyadmin:
+      image: phpmyadmin/phpmyadmin
+      container_name: phpmyadmin
+      environment:
+        PMA_HOST: mysql
+        PMA_USER: airflow_user
+        PMA_PASSWORD: airflow_password
+      ports:
+        - "8081:80"
   webserver:
     build: .
     restart: always
@@ -61,6 +69,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    
 
   scheduler:
     build: .
